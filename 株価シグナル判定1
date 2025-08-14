@@ -1,0 +1,61 @@
+import streamlit as st
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+st.set_page_config(page_title="株価シグナル判定", layout="wide")
+st.title("📊 株価シグナル判定アプリ（yfinance版）")
+
+code = st.text_input("銘柄コードを入力（例: 7203.T for トヨタ、AAPL for Apple）", "7203.T")
+
+def calc_rsi(series, period=14):
+    delta = series.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(period).mean()
+    avg_loss = loss.rolling(period).mean()
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+if st.button("解析する"):
+    try:
+        data = yf.download(code, period="1y", interval="1d")
+
+        if data.empty:
+            st.error("データが取得できませんでした。コードを確認してください。")
+        else:
+            data["SMA20"] = data["Close"].rolling(20).mean()
+            data["SMA50"] = data["Close"].rolling(50).mean()
+            data["RSI"] = calc_rsi(data["Close"])
+
+            buy_signals = (
+                (data["SMA20"] > data["SMA50"])
+                & (data["SMA20"].shift(1) <= data["SMA50"].shift(1))
+                & (data["RSI"] < 70)
+            )
+            sell_signals = (
+                (data["SMA20"] < data["SMA50"])
+                & (data["SMA20"].shift(1) >= data["SMA50"].shift(1))
+            ) | (data["RSI"] > 70)
+
+            fig, ax = plt.subplots(figsize=(12, 6))
+            ax.plot(data.index, data["Close"], label="Close", color="blue")
+            ax.plot(data.index, data["SMA20"], label="SMA20", color="orange")
+            ax.plot(data.index, data["SMA50"], label="SMA50", color="green")
+
+            ax.scatter(data.index[buy_signals], data["Close"][buy_signals], marker="^", color="red", label="Buy")
+            ax.scatter(data.index[sell_signals], data["Close"][sell_signals], marker="v", color="purple", label="Sell")
+
+            ax.set_title(f"{code} - 株価シグナル")
+            ax.legend()
+            st.pyplot(fig)
+
+            st.subheader("📈 買いシグナル日")
+            st.write(data.index[buy_signals].strftime("%Y-%m-%d").tolist())
+
+            st.subheader("📉 売りシグナル日")
+            st.write(data.index[sell_signals].strftime("%Y-%m-%d").tolist())
+
+    except Exception as e:
+        st.error(f"エラー: {e}")
