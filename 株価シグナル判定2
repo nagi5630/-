@@ -1,0 +1,155 @@
+import streamlit as st
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+st.set_page_config(page_title="株価シグナル判定＋業績情報", layout="wide")
+st.title("📊 株価シグナル判定＆財務情報アプリ")
+
+code = st.text_input("銘柄コードを入力（例: 7203.T for トヨタ、AAPL for Apple）", "7203.T")
+
+def calc_rsi(series, period=14):
+    delta = series.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(period).mean()
+    avg_loss = loss.rolling(period).mean()
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+def show_signal_explanation():
+    st.markdown("""
+    ### シグナルの意味と根拠
+    - **買いシグナル**  
+      - 短期移動平均線（SMA20）が中期移動平均線（SMA50）を下から上に抜ける（ゴールデンクロス）  
+      - RSIが70未満（過熱状態でない）  
+      → 「上昇トレンドの始まりで、買いチャンス」と判断しています。  
+    - **売りシグナル**  
+      - 短期移動平均線（SMA20）が中期移動平均線（SMA50）を上から下に抜ける（デッドクロス）  
+      - またはRSIが70以上（買われすぎの過熱感）  
+      → 「トレンドの転換や利益確定のタイミング」と見ています。  
+    """)
+
+def safe_single_value(v):
+    """もしvがSeries/DataFrameやlistなら単一の値に変換、そうでなければそのまま返す"""
+    if isinstance(v, pd.Series) or isinstance(v, pd.DataFrame):
+        if v.empty:
+            return None
+        if isinstance(v, pd.DataFrame):
+            return safe_single_value(v.iloc[0, 0])
+        else:
+            return safe_single_value(v.iloc[0])
+    elif isinstance(v, (list, tuple)):
+        if len(v) == 0:
+            return None
+        else:
+            return safe_single_value(v[0])
+    else:
+        return v
+
+def format_val(v):
+    v = safe_single_value(v)
+    if v is None:
+        return "N/A"
+    if isinstance(v, (int, float, np.float64, np.int64)):
+        try:
+            return f"{v:,.2f}"
+        except Exception:
+            return str(v)
+    return str(v)
+
+if st.button("解析する"):
+    try:
+        data = yf.download(code, period="1y", interval="1d")
+        if data.empty:
+            st.error("データが取得できませんでした。銘柄コードを確認してください。")
+            st.stop()
+
+        data["SMA20"] = data["Close"].rolling(20).mean()
+        data["SMA50"] = data["Close"].rolling(50).mean()
+        data["RSI"] = calc_rsi(data["Close"])
+
+        buy_signals = (
+            (data["SMA20"] > data["SMA50"]) &
+            (data["SMA20"].shift(1) <= data["SMA50"].shift(1)) &
+            (data["RSI"] < 70)
+        )
+        sell_signals = (
+            (data["SMA20"] < data["SMA50"]) &
+            (data["SMA20"].shift(1) >= data["SMA50"].shift(1))
+        ) | (data["RSI"] > 70)
+
+        fig, ax = plt.subplots(figsize=(12,6))
+        ax.plot(data.index, data["Close"], label="Close", color="blue")
+        ax.plot(data.index, data["SMA20"], label="SMA20", color="orange")
+        ax.plot(data.index, data["SMA50"], label="SMA50", color="green")
+
+        ax.scatter(data.index[buy_signals], data["Close"][buy_signals], marker="^", color="red", label="Buy")
+        ax.scatter(data.index[sell_signals], data["Close"][sell_signals], marker="v", color="purple", label="Sell")
+
+        ax.set_title(f"{code} - 株価シグナル")
+        ax.legend()
+        st.pyplot(fig)
+
+        st.subheader("📈 買いシグナル日")
+        st.write(data.index[buy_signals].strftime("%Y-%m-%d").tolist())
+
+        st.subheader("📉 売りシグナル日")
+        st.write(data.index[sell_signals].strftime("%Y-%m-%d").tolist())
+
+        show_signal_explanation()
+
+        st.subheader("💡 買い・売り価格の目安")
+
+        recent_close = safe_single_value(data["Close"].dropna().iloc[-1])
+        rolling_low = data["Low"].rolling(5).min().dropna()
+        rolling_high = data["High"].rolling(5).max().dropna()
+
+        recent_low = safe_single_value(rolling_low.iloc[-1]) if not rolling_low.empty else None
+        recent_high = safe_single_value(rolling_high.iloc[-1]) if not rolling_high.empty else None
+
+        st.write(f"現在の終値: {format_val(recent_close)} 円")
+
+        if recent_low is not None:
+            st.write(f"直近5日間の安値: {format_val(recent_low)} 円")
+        else:
+            st.write("直近5日間の安値データが不足しています。")
+
+        if recent_high is not None:
+            st.write(f"直近5日間の高値: {format_val(recent_high)} 円")
+        else:
+            st.write("直近5日間の高値データが不足しています。")
+
+        st.markdown("""
+        - **買い目安:** 直近5日間の安値を下回ったら注目（割安の可能性あり）  
+        - **売り目安:** 直近5日間の高値を超えたら利益確定を検討  
+        """)
+
+        st.subheader("🏦 業績・財務指標")
+
+        ticker = yf.Ticker(code)
+        info = ticker.info
+
+        indicators = {
+            "現在株価": info.get("currentPrice", "N/A"),
+            "時価総額": info.get("marketCap", "N/A"),
+            "PER（株価収益率）": info.get("trailingPE", "N/A"),
+            "PBR（株価純資産倍率）": info.get("priceToBook", "N/A"),
+            "ROE（自己資本利益率）": info.get("returnOnEquity", "N/A"),
+            "配当利回り": info.get("dividendYield", "N/A"),
+            "売上高": info.get("totalRevenue", "N/A"),
+            "営業利益": info.get("operatingIncome", "N/A"),
+            "純利益": info.get("netIncome", "N/A"),
+            "発行済株式数": info.get("sharesOutstanding", "N/A"),
+        }
+
+        for key in indicators:
+            indicators[key] = safe_single_value(indicators[key])
+
+        df_indicators = pd.DataFrame.from_dict(indicators, orient="index", columns=["値"])
+        df_indicators["値"] = df_indicators["値"].apply(format_val)
+        st.table(df_indicators)
+
+    except Exception as e:
+        st.error(f"エラー: {e}")
