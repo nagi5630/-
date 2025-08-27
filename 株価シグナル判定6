@@ -1,0 +1,550 @@
+# streamlit_pattern_15_complete.py
+# 必要パッケージ: streamlit, yfinance, pandas, numpy, matplotlib
+# 実行: streamlit run streamlit_pattern_15_complete.py
+
+import streamlit as st
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from datetime import timedelta
+
+st.set_page_config(page_title="株価 15 パターン検出＆未来予測", layout="wide")
+st.title("📊 株価 15パターン検出 ＆ 未来予測 (ルールベース)")
+
+# -------------------------
+# ユーティリティ関数
+# -------------------------
+def safe_float(x):
+    try:
+        return float(x)
+    except Exception:
+        return None
+
+def format_price_num(x):
+    v = safe_float(x)
+    return "N/A" if v is None else f"{v:,.2f}"
+
+def to_list_datetime(index):
+    """DatetimeIndex -> list[datetime]"""
+    try:
+        return list(index.to_pydatetime())
+    except Exception:
+        return list(index)
+
+def simple_peaks(arr: np.ndarray, distance: int = 5, kind: str = "max"):
+    """
+    非 scipy 簡易ピーク/トラフ検出。
+    kind: "max" or "min"
+    distance: 最小間隔
+    return: numpy.array of positions (ints)
+    """
+    n = len(arr)
+    idxs = []
+    if n <= distance * 2:
+        return np.array([], dtype=int)
+    for i in range(distance, n - distance):
+        left = arr[i - distance:i]
+        right = arr[i + 1:i + 1 + distance]
+        if kind == "max":
+            if arr[i] >= left.max() and arr[i] >= right.max():
+                idxs.append(i)
+        else:
+            if arr[i] <= left.min() and arr[i] <= right.min():
+                idxs.append(i)
+    return np.array(idxs, dtype=int)
+
+# -------------------------
+# パターン検出(15種)
+# すべて位置(整数index)/float を扱う。Series は直接 if 判定しない。
+# -------------------------
+def detect_double_top(df, window_recent=60, tol_pct=0.03):
+    res = []
+    closes = df['Close'].values
+    n = len(closes)
+    if n < 30: 
+        return res
+    start = max(0, n - window_recent)
+    arr = closes[start:]
+    peaks = simple_peaks(arr, distance=4, kind='max')
+    if len(peaks) >= 2:
+        for i in range(len(peaks) - 1):
+            a = start + int(peaks[i])
+            b = start + int(peaks[i+1])
+            pa = float(closes[a]); pb = float(closes[b])
+            if pa <= 0: continue
+            if abs(pa - pb) / pa <= tol_pct:
+                neckline_val = float(np.min(closes[a:b+1]))
+                height = max(pa, pb) - neckline_val
+                target = neckline_val - height
+                invalid = neckline_val * 1.01
+                res.append({
+                    'name': 'ダブルトップ',
+                    'kind': '下降',
+                    'points': [a,b],
+                    'entry': float(closes[-1]),
+                    'target': float(target),
+                    'invalidation': float(invalid),
+                    'info': f"peaks idx {a},{b}, neckline {format_price_num(neckline_val)}"
+                })
+    return res
+
+def detect_double_bottom(df, window_recent=60, tol_pct=0.03):
+    res = []
+    closes = df['Close'].values
+    n = len(closes)
+    if n < 30:
+        return res
+    start = max(0, n - window_recent)
+    arr = closes[start:]
+    troughs = simple_peaks(arr, distance=4, kind='min')
+    if len(troughs) >= 2:
+        for i in range(len(troughs) - 1):
+            a = start + int(troughs[i])
+            b = start + int(troughs[i+1])
+            pa = float(closes[a]); pb = float(closes[b])
+            if pa <= 0: continue
+            if abs(pa - pb) / pa <= tol_pct:
+                neckline_val = float(np.max(closes[a:b+1]))
+                height = neckline_val - min(pa,pb)
+                target = neckline_val + height
+                invalid = min(pa,pb) * 0.99
+                res.append({
+                    'name': 'ダブルボトム',
+                    'kind': '上昇',
+                    'points': [a,b],
+                    'entry': float(closes[-1]),
+                    'target': float(target),
+                    'invalidation': float(invalid),
+                    'info': f"troughs idx {a},{b}, neckline {format_price_num(neckline_val)}"
+                })
+    return res
+
+def detect_triple_top(df, window_recent=90, tol_pct=0.03):
+    res = []
+    closes = df['Close'].values; n = len(closes)
+    if n < 50: return res
+    start = max(0, n - window_recent)
+    arr = closes[start:]
+    peaks = simple_peaks(arr, distance=4, kind='max')
+    if len(peaks) >= 3:
+        for i in range(len(peaks)-2):
+            a = start + int(peaks[i]); b = start + int(peaks[i+1]); c = start + int(peaks[i+2])
+            pa, pb, pc = float(closes[a]), float(closes[b]), float(closes[c])
+            if pa <= 0: continue
+            if max(abs(pa-pb)/pa, abs(pb-pc)/pb, abs(pa-pc)/pa) <= tol_pct:
+                neckline_val = float(np.min(closes[a:c+1]))
+                height = max(pa,pb,pc) - neckline_val
+                target = neckline_val - height
+                invalid = neckline_val * 1.01
+                res.append({
+                    'name': 'トリプルトップ',
+                    'kind': '下降',
+                    'points': [a,b,c],
+                    'entry': float(closes[-1]),
+                    'target': float(target),
+                    'invalidation': float(invalid),
+                    'info': f"peaks idx {a},{b},{c}"
+                })
+    return res
+
+def detect_triple_bottom(df, window_recent=90, tol_pct=0.03):
+    res = []
+    closes = df['Close'].values; n = len(closes)
+    if n < 50: return res
+    start = max(0, n - window_recent)
+    arr = closes[start:]
+    troughs = simple_peaks(arr, distance=4, kind='min')
+    if len(troughs) >= 3:
+        for i in range(len(troughs)-2):
+            a = start + int(troughs[i]); b = start + int(troughs[i+1]); c = start + int(troughs[i+2])
+            pa, pb, pc = float(closes[a]), float(closes[b]), float(closes[c])
+            if pa <= 0: continue
+            if max(abs(pa-pb)/pa, abs(pb-pc)/pb, abs(pa-pc)/pa) <= tol_pct:
+                neckline_val = float(np.max(closes[a:c+1]))
+                height = neckline_val - min(pa,pb,pc)
+                target = neckline_val + height
+                invalid = min(pa,pb,pc) * 0.99
+                res.append({
+                    'name': 'トリプルボトム',
+                    'kind': '上昇',
+                    'points': [a,b,c],
+                    'entry': float(closes[-1]),
+                    'target': float(target),
+                    'invalidation': float(invalid),
+                    'info': f"troughs idx {a},{b},{c}"
+                })
+    return res
+
+def detect_head_and_shoulders_top(df, window_recent=120, tol_pct=0.08):
+    res = []
+    closes = df['Close'].values; n=len(closes)
+    if n < 60: return res
+    start = max(0, n - window_recent)
+    arr = closes[start:]
+    peaks = simple_peaks(arr, distance=4, kind='max')
+    troughs = simple_peaks(arr, distance=4, kind='min')
+    if len(peaks) >= 3:
+        for i in range(len(peaks)-2):
+            L = start + int(peaks[i]); H = start + int(peaks[i+1]); R = start + int(peaks[i+2])
+            pL, pH, pR = float(closes[L]), float(closes[H]), float(closes[R])
+            if pH > pL and pH > pR and abs(pL - pR) / pL <= tol_pct:
+                # neckline: average of two troughs between L-H and H-R (if present)
+                left_trough_idx = None
+                right_trough_idx = None
+                # search for min between L and H
+                if H - L > 1:
+                    left_trough_idx = int(L + np.argmin(closes[L:H+1]))
+                if R - H > 1:
+                    right_trough_idx = int(H + 1 + np.argmin(closes[H+1:R+1]))
+                if left_trough_idx is not None and right_trough_idx is not None:
+                    nl_y1 = float(closes[left_trough_idx]); nl_y2 = float(closes[right_trough_idx])
+                    neckline = (nl_y1 + nl_y2) / 2.0
+                    height = pH - neckline
+                    target = neckline - height
+                    invalid = max(nl_y1, nl_y2) * 1.02
+                    res.append({
+                        'name': 'ヘッド＆ショルダー・トップ',
+                        'kind': '下降',
+                        'points': [L,H,R],
+                        'entry': float(closes[-1]),
+                        'target': float(target),
+                        'invalidation': float(invalid),
+                        'info': f"neck {format_price_num(neckline)}"
+                    })
+    return res
+
+def detect_head_and_shoulders_bottom(df, window_recent=120, tol_pct=0.08):
+    res = []
+    closes = df['Close'].values; n=len(closes)
+    if n < 60: return res
+    start = max(0, n - window_recent)
+    arr = closes[start:]
+    troughs = simple_peaks(arr, distance=4, kind='min')
+    peaks = simple_peaks(arr, distance=4, kind='max')
+    if len(troughs) >= 3:
+        for i in range(len(troughs)-2):
+            L = start + int(troughs[i]); H = start + int(troughs[i+1]); R = start + int(troughs[i+2])
+            pL, pH, pR = float(closes[L]), float(closes[H]), float(closes[R])
+            if pH < pL and pH < pR and abs(pL - pR) / pL <= tol_pct:
+                # neckline peaks between L-H and H-R
+                left_peak_idx = None
+                right_peak_idx = None
+                if H - L > 1:
+                    left_peak_idx = int(L + np.argmax(closes[L:H+1]))
+                if R - H > 1:
+                    right_peak_idx = int(H + 1 + np.argmax(closes[H+1:R+1]))
+                if left_peak_idx is not None and right_peak_idx is not None:
+                    nl_y1 = float(closes[left_peak_idx]); nl_y2 = float(closes[right_peak_idx])
+                    neckline = (nl_y1 + nl_y2) / 2.0
+                    height = neckline - pH
+                    target = neckline + height
+                    invalid = pH * 0.99
+                    res.append({
+                        'name': 'ヘッド＆ショルダー・ボトム',
+                        'kind': '上昇',
+                        'points': [L,H,R],
+                        'entry': float(closes[-1]),
+                        'target': float(target),
+                        'invalidation': float(invalid),
+                        'info': f"neck {format_price_num(nl_y1)} & {format_price_num(nl_y2)}"
+                    })
+    return res
+
+def detect_saucer_top_bottom(df, window=30):
+    res = []
+    closes = df['Close'].values; n = len(closes)
+    if n < window*2: return res
+    # sliding windows to find saucer-like shapes near the end
+    for start in range(max(0,n-window*3), n-window):
+        seg = closes[start:start+window]
+        left = np.mean(seg[:max(1,window//3)])
+        mid = np.mean(seg[window//3:window*2//3])
+        right = np.mean(seg[-max(1,window//3):])
+        # saucer bottom
+        if mid < left and mid < right and (left - mid)/left > 0.02 and (right - mid)/right > 0.02:
+            entry = float(closes[-1])
+            neckline = float(right)
+            height = neckline - mid
+            target = neckline + height
+            invalid = float(mid * 0.98)
+            res.append({
+                'name':'ソーサーボトム',
+                'kind':'上昇',
+                'points':[start, start+window//2, start+window-1],
+                'entry': entry,
+                'target': float(target),
+                'invalidation': float(invalid),
+                'info': f"saucer start {start}"
+            })
+        # saucer top
+        if mid > left and mid > right and (mid - left)/left > 0.02 and (mid - right)/right > 0.02:
+            entry = float(closes[-1])
+            neckline = float(right)
+            height = mid - neckline
+            target = neckline - height
+            invalid = float(mid * 1.02)
+            res.append({
+                'name':'ソーサートップ',
+                'kind':'下降',
+                'points':[start, start+window//2, start+window-1],
+                'entry': entry,
+                'target': float(target),
+                'invalidation': float(invalid),
+                'info': f"saucer start {start}"
+            })
+    return res
+
+def detect_triangles_and_boxes(df):
+    """
+    上昇/下降三角、ボックス（レンジ）を簡易判定。
+    - 上昇三角: 高値は横ばい or slight down, 安値は切り上げ
+    - 下降三角: 安値は横ばい, 高値は切り下げ
+    - ボックス: 価格レンジが狭い
+    """
+    res = []
+    closes = df['Close'].values; highs = df['High'].values; lows = df['Low'].values
+    n = len(closes)
+    if n < 30: return res
+    N = min(60, n)
+    sub_h = highs[-N:]; sub_l = lows[-N:]; sub_c = closes[-N:]
+    # linear fit
+    x = np.arange(len(sub_c))
+    # highs trend
+    try:
+        kh, bh = np.polyfit(x, sub_h, 1)
+        kl, bl = np.polyfit(x, sub_l, 1)
+    except Exception:
+        return res
+    # box: range small
+    rng = sub_h.max() - sub_l.min()
+    avg = sub_c.mean()
+    if avg > 0 and (rng / avg) < 0.06:
+        res.append({
+            'name': 'ボックス(レンジ)',
+            'kind': '横ばい',
+            'entry': float(closes[-1]),
+            'target': float(sub_h.max()),
+            'invalidation': float(sub_h.max() * 1.02),
+            'info': f"range {format_price_num(rng)}"
+        })
+    # triangle checks: if upper slope ~ 0 and lower slope > 0 -> ascending triangle
+    if abs(kh) < 0.001 and kl > 0.0:
+        # ascending triangle -> breakout up
+        entry = float(closes[-1])
+        target = float(entry + (sub_h.max()-sub_l.min()))
+        res.append({
+            'name': '上昇三角保ち合い',
+            'kind': '上昇',
+            'entry': entry,
+            'target': target,
+            'invalidation': float(sub_l.min()*0.99),
+            'info': f"kh {kh:.4f}, kl {kl:.4f}"
+        })
+    if abs(kl) < 0.001 and kh < 0.0:
+        entry = float(closes[-1])
+        target = float(entry - (sub_h.max()-sub_l.min()))
+        res.append({
+            'name': '下降三角保ち合い',
+            'kind': '下降',
+            'entry': entry,
+            'target': target,
+            'invalidation': float(sub_h.max()*1.01),
+            'info': f"kh {kh:.4f}, kl {kl:.4f}"
+        })
+    # wedges (粗い判定): both slopes positive but upper slope < lower slope -> rising wedge (bearish)
+    if kh > 0 and kl > 0 and kl > kh * 1.2:
+        entry = float(closes[-1])
+        target = float(entry - (sub_h.max()-sub_l.min())*0.6)
+        res.append({
+            'name': '上昇ウェッジ',
+            'kind': '下降',
+            'entry': entry,
+            'target': target,
+            'invalidation': float(sub_h.max()*1.02),
+            'info': f"wedge rising kh {kh:.4f}, kl {kl:.4f}"
+        })
+    if kh < 0 and kl < 0 and abs(kh) > abs(kl) * 1.2:
+        entry = float(closes[-1])
+        target = float(entry + (sub_h.max()-sub_l.min())*0.6)
+        res.append({
+            'name': '下降ウェッジ',
+            'kind': '上昇',
+            'entry': entry,
+            'target': target,
+            'invalidation': float(sub_l.min()*0.99),
+            'info': f"wedge falling kh {kh:.4f}, kl {kl:.4f}"
+        })
+    # flags simple: recent trend strong then consolidation -> continuation
+    recent = sub_c
+    if recent[-1] > recent[0] * 1.05:
+        res.append({
+            'name': '上昇フラッグ',
+            'kind': '上昇',
+            'entry': float(closes[-1]),
+            'target': float(closes[-1]*1.05),
+            'invalidation': float(sub_l.min()*0.99),
+            'info': 'recent up consolidation'
+        })
+    if recent[-1] < recent[0] * 0.95:
+        res.append({
+            'name': '下降フラッグ',
+            'kind': '下降',
+            'entry': float(closes[-1]),
+            'target': float(closes[-1]*0.95),
+            'invalidation': float(sub_h.max()*1.01),
+            'info': 'recent down consolidation'
+        })
+    return res
+
+# -------------------------
+# まとめて全検出する関数
+# -------------------------
+def detect_all_patterns(df):
+    patterns = []
+    patterns += detect_double_top(df)
+    patterns += detect_double_bottom(df)
+    patterns += detect_triple_top(df)
+    patterns += detect_triple_bottom(df)
+    patterns += detect_head_and_shoulders_top(df)
+    patterns += detect_head_and_shoulders_bottom(df)
+    patterns += detect_saucer_top_bottom(df)
+    patterns += detect_triangles_and_boxes(df)
+    # dedupe by name+target (approx)
+    unique = []
+    seen = set()
+    for p in patterns:
+        key = (p.get('name'), round(safe_float(p.get('target') or 0), 2))
+        if key not in seen:
+            seen.add(key)
+            unique.append(p)
+    # sort by simple heuristic: kind: 上昇/下降 first, then confidence by presence (no explicit conf here)
+    return unique
+
+# -------------------------
+# 予測のための単純モデル（過去の平均リターンベース）
+# -------------------------
+def forecast_simple(data, periods=10):
+    # periods: number of future business days
+    # compute mean daily pct change over recent window
+    recent = data['Close'].pct_change().dropna().iloc[-60:]
+    if len(recent) == 0:
+        return []
+    mean_ret = float(recent.mean())
+    last = float(data['Close'].iloc[-1])
+    preds = [last]
+    for _ in range(periods):
+        preds.append(preds[-1] * (1 + mean_ret))
+    return preds  # length periods+1, first is last price
+
+# -------------------------
+# Streamlit UI
+# -------------------------
+col1, col2 = st.columns([1,3])
+with col1:
+    symbol = st.text_input("銘柄コード (例: AAPL, 7203.T)", "AAPL")
+    period = st.selectbox("取得期間", ["6mo","1y","2y","5y"], index=1)
+    run = st.button("解析・15パターン検出")
+    st.markdown("""
+    ルールベースで15種類のチャートパターンを簡易検出します。\n
+    ※ 自動検出は近似的です。実取引では必ず自身で確認してください。
+    """)
+
+with col2:
+    placeholder = st.empty()
+
+if run:
+    try:
+        df = yf.download(symbol, period=period, interval="1d", progress=False)
+        if df is None or df.empty:
+            st.error("データが取得できません。ティッカーや期間を確認してください。")
+            st.stop()
+        df = df.dropna()
+        if len(df) < 30:
+            st.error("データが短すぎます。期間を長くしてください。")
+            st.stop()
+
+        patterns = detect_all_patterns(df)
+
+        # prepare plotting arrays (ensure 1-D lists)
+        past_dates = to_list_datetime(df.index)
+        past_closes = list(df['Close'].values)
+
+        future_days = 10
+        # future business days
+        last_date = df.index[-1]
+        future_idx = pd.date_range(last_date, periods=future_days+1, freq='B')[1:]
+        future_dates = list(future_idx.to_pydatetime())
+
+        # forecast baseline
+        forecast_vals = forecast_simple(df, periods=future_days)
+        # forecast_vals is [last_price, p1, p2, ...]
+        forecast_dates = [past_dates[-1]] + future_dates
+        forecast_vals_plot = list(forecast_vals)
+
+        # Plot
+        fig, ax = plt.subplots(figsize=(14,7))
+        ax.plot(past_dates, past_closes, color='black', linewidth=1.3, label='過去終値')
+        # baseline forecast
+        ax.plot(forecast_dates, forecast_vals_plot, color='tab:gray', linestyle='--', label='簡易予測(平均リターン)')
+
+        # overlay pattern predictions
+        legend_entries = set()
+        for p in patterns:
+            name = p.get('name')
+            kind = p.get('kind')
+            entry = safe_float(p.get('entry'))
+            target = safe_float(p.get('target'))
+            invalid = safe_float(p.get('invalidation'))
+            info = p.get('info', "")
+            color = 'tab:green' if kind in ('上昇','継続(上)','継続') else 'tab:red'
+
+            # ensure x,y are 1-D lists
+            x_plot = [past_dates[-1]] + future_dates
+            # if target is None, fallback to baseline forecast last value
+            if target is None:
+                y_plot = [entry] + [forecast_vals_plot[-1]] * len(future_dates)
+            else:
+                y_plot = [entry] + [target] * len(future_dates)
+
+            x_plot = list(x_plot)
+            y_plot = list(y_plot)
+
+            ax.plot(x_plot, y_plot, linestyle='--', linewidth=2, color=color)
+            if invalid is not None:
+                ax.axhline(invalid, linestyle=':', linewidth=1, color='tab:orange')
+
+            # add text label near last point (offset)
+            try:
+                ax.text(past_dates[-1] + timedelta(days=1), y_plot[1], f"{name}\nT:{format_price_num(target)}", fontsize=8)
+            except Exception:
+                pass
+
+            # add legend markers once
+            label_pred = f"{name} 予測"
+            if label_pred not in legend_entries:
+                ax.plot([], [], linestyle='--', color=color, label=label_pred)
+                legend_entries.add(label_pred)
+
+        ax.set_title(f"{symbol} - 過去とパターンベース予測 ({period})")
+        ax.set_xlabel("Date")
+        ax.set_ylabel("Price")
+        ax.grid(alpha=0.25)
+        ax.legend(loc='upper left', fontsize='small')
+        st.pyplot(fig)
+
+        # show table of detected patterns
+        if patterns:
+            st.subheader("🔎 検出されたパターン（候補）")
+            df_pat = pd.DataFrame(patterns)
+            # ensure display-friendly formatting
+            if 'target' in df_pat.columns:
+                df_pat['entry'] = df_pat['entry'].apply(format_price_num)
+                df_pat['target'] = df_pat['target'].apply(format_price_num)
+                df_pat['invalidation'] = df_pat['invalidation'].apply(format_price_num)
+            st.table(df_pat[['name','kind','entry','target','invalidation','info']])
+        else:
+            st.info("パターンは検出されませんでした（閾値・期間を調整してください）。")
+
+    except Exception as e:
+        st.error(f"エラー: {e}")
