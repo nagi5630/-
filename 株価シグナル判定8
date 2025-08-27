@@ -1,0 +1,228 @@
+# streamlit_future_trade_patterns.py
+import streamlit as st
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+st.set_page_config(page_title="株価未来パターン予測＆トレード目安", layout="wide")
+st.title("📈 株価未来パターン予測＆トレード目安（15パターン対応）")
+
+# ------------------- ユーティリティ -------------------
+def safe_last_value(v):
+    if isinstance(v, pd.DataFrame):
+        if v.empty: return None
+        return safe_last_value(v.iloc[-1,0])
+    if isinstance(v, pd.Series):
+        if v.empty: return None
+        return safe_last_value(v.iloc[-1])
+    if isinstance(v,(list,tuple,np.ndarray)):
+        if len(v)==0: return None
+        return safe_last_value(v[-1])
+    return v
+
+def format_price(v):
+    v = safe_last_value(v)
+    if v is None: return "N/A"
+    try:
+        return f"{float(v):,.2f}"
+    except:
+        return str(v)
+
+def pct(a,b):
+    try:
+        a=float(a); b=float(b)
+        if a==0: return 0.0
+        return abs(a-b)/abs(a)*100.0
+    except:
+        return 0.0
+
+def calc_sma(series, period):
+    return series.rolling(period,min_periods=1).mean()
+
+def calc_rsi(series, period=14):
+    delta = series.diff()
+    gain = delta.where(delta>0,0.0)
+    loss = -delta.where(delta<0,0.0)
+    avg_gain = gain.rolling(period,min_periods=1).mean()
+    avg_loss = loss.rolling(period,min_periods=1).mean()
+    rs = avg_gain/(avg_loss.replace(0,np.nan))
+    rsi = 100-(100/(1+rs))
+    return rsi.fillna(50.0)
+
+# ------------------- 未来パターン＋トレード目安 -------------------
+def predict_future_trade_patterns(df, lookback=20):
+    closes = df['Close'].values.astype(float)
+    highs = df['High'].values.astype(float)
+    lows = df['Low'].values.astype(float)
+    recent = closes[-lookback:]
+    recent_high = float(highs[-lookback:].max())
+    recent_low = float(lows[-lookback:].min())
+    last_close = float(closes[-1])
+    patterns=[]
+
+    # エントリー・利確・損切り計算関数
+    def calc_trade(kind, target_price):
+        if kind=='上昇':
+            entry = last_close * 0.995  # 少し押し目で買う
+            take_profit = target_price
+            stop_loss = last_close * 0.97
+        else:
+            entry = last_close * 1.005  # 少し戻りで売る
+            take_profit = target_price
+            stop_loss = last_close * 1.03
+        return entry, take_profit, stop_loss
+
+    # --- 15パターン予測 ---
+    # 1. ダブルトップ／2.ダブルボトム
+    if len(recent)>=3:
+        if float(recent[-2]) > float(recent[-3]) and float(recent[-2]) > float(recent[-1]):
+            target = recent_low - (recent_high - recent_low)
+            entry,tp,sl = calc_trade('下落', target)
+            patterns.append({'name':'ダブルトップ','kind':'下落','confidence':65,'target':target,'entry':entry,'sl':sl,'tp':tp})
+        if float(recent[-2]) < float(recent[-3]) and float(recent[-2]) < float(recent[-1]):
+            target = recent_high + (recent_high - recent_low)
+            entry,tp,sl = calc_trade('上昇', target)
+            patterns.append({'name':'ダブルボトム','kind':'上昇','confidence':65,'target':target,'entry':entry,'sl':sl,'tp':tp})
+
+    # 3-4. トリプルトップ／トリプルボトム
+    if len(recent)>=5:
+        mid = float(recent[-3])
+        if mid == max(recent[-5:]):
+            target = recent_low - (mid - recent_low)
+            entry,tp,sl = calc_trade('下落', target)
+            patterns.append({'name':'トリプルトップ','kind':'下落','confidence':60,'target':target,'entry':entry,'sl':sl,'tp':tp})
+        if mid == min(recent[-5:]):
+            target = recent_high + (recent_high - mid)
+            entry,tp,sl = calc_trade('上昇', target)
+            patterns.append({'name':'トリプルボトム','kind':'上昇','confidence':60,'target':target,'entry':entry,'sl':sl,'tp':tp})
+
+    # 5-6. ヘッド＆ショルダー／逆ヘッド＆ショルダー
+    if len(recent)>=7:
+        mid = float(recent[-4])
+        if mid == max(recent[-7:]):
+            target = recent_low - (mid - recent_low)
+            entry,tp,sl = calc_trade('下落', target)
+            patterns.append({'name':'ヘッド＆ショルダー','kind':'下落','confidence':60,'target':target,'entry':entry,'sl':sl,'tp':tp})
+        if mid == min(recent[-7:]):
+            target = recent_high + (recent_high - mid)
+            entry,tp,sl = calc_trade('上昇', target)
+            patterns.append({'name':'逆ヘッド＆ショルダー','kind':'上昇','confidence':60,'target':target,'entry':entry,'sl':sl,'tp':tp})
+
+    # 7-8. ソーサー型／ラウンドトップ型
+    if len(recent)>=10:
+        mid = float(recent[-5])
+        if mid == min(recent[-10:]):
+            target = recent_high + (recent_high - mid)
+            entry,tp,sl = calc_trade('上昇', target)
+            patterns.append({'name':'ソーサー型','kind':'上昇','confidence':55,'target':target,'entry':entry,'sl':sl,'tp':tp})
+        if mid == max(recent[-10:]):
+            target = recent_low - (mid - recent_low)
+            entry,tp,sl = calc_trade('下落', target)
+            patterns.append({'name':'ラウンドトップ型','kind':'下落','confidence':55,'target':target,'entry':entry,'sl':sl,'tp':tp})
+
+    # 9-10. フラッグ／ペナント
+    sma5_last = float(calc_sma(df['Close'],5).iloc[-1])
+    if last_close > sma5_last:
+        target = last_close * 1.03
+        entry,tp,sl = calc_trade('上昇', target)
+        patterns.append({'name':'フラッグ','kind':'上昇','confidence':50,'target':target,'entry':entry,'sl':sl,'tp':tp})
+        patterns.append({'name':'ペナント','kind':'上昇','confidence':50,'target':target*0.98,'entry':entry,'sl':sl,'tp':tp*0.98})
+    else:
+        target = last_close * 0.97
+        entry,tp,sl = calc_trade('下落', target)
+        patterns.append({'name':'フラッグ下落','kind':'下落','confidence':50,'target':target,'entry':entry,'sl':sl,'tp':tp})
+        patterns.append({'name':'ペナント下落','kind':'下落','confidence':50,'target':target*0.98,'entry':entry,'sl':sl,'tp':tp*0.98})
+
+    # 11-12. V字／逆V字
+    if len(recent)>=3:
+        if float(recent[-2]) < float(recent[-3]) and float(recent[-2]) < float(recent[-1]):
+            target = last_close + (float(recent[-1])-float(recent[-2]))*1.5
+            entry,tp,sl = calc_trade('上昇', target)
+            patterns.append({'name':'V字回復','kind':'上昇','confidence':55,'target':target,'entry':entry,'sl':sl,'tp':tp})
+        if float(recent[-2]) > float(recent[-3]) and float(recent[-2]) > float(recent[-1]):
+            target = last_close - (float(recent[-2])-float(recent[-1]))*1.5
+            entry,tp,sl = calc_trade('下落', target)
+            patterns.append({'name':'逆V字','kind':'下落','confidence':55,'target':target,'entry':entry,'sl':sl,'tp':tp})
+
+    # 13-14. レンジブレイク上／下
+    if last_close > recent_high:
+        target = last_close + (recent_high-recent_low)
+        entry,tp,sl = calc_trade('上昇', target)
+        patterns.append({'name':'レンジブレイク上','kind':'上昇','confidence':60,'target':target,'entry':entry,'sl':sl,'tp':tp})
+    if last_close < recent_low:
+        target = last_close - (recent_high-recent_low)
+        entry,tp,sl = calc_trade('下落', target)
+        patterns.append({'name':'レンジブレイク下','kind':'下落','confidence':60,'target':target,'entry':entry,'sl':sl,'tp':tp})
+
+    # 15. レンジ反発
+    mid_range = (recent_high+recent_low)/2
+    if abs(last_close-mid_range)/mid_range < 0.02:
+        target = mid_range + (recent_high-mid_range)
+        entry,tp,sl = calc_trade('上昇', target)
+        patterns.append({'name':'レンジ反発','kind':'上昇','confidence':50,'target':target,'entry':entry,'sl':sl,'tp':tp})
+
+    return patterns
+
+# ------------------- Streamlit UI -------------------
+st.markdown("銘柄コードを入力すると未来パターンとトレード目安（エントリー・利確・損切り）を予測します。")
+
+symbol = st.text_input("銘柄コード", "AAPL")
+run = st.button("未来予測")
+
+if run:
+    try:
+        df=yf.download(symbol,period="1y",interval="1d",progress=False).dropna()
+        if df.empty:
+            st.error("データ取得できませんでした")
+            st.stop()
+
+        df['SMA20']=calc_sma(df['Close'],20)
+        df['SMA50']=calc_sma(df['Close'],50)
+        df['RSI']=calc_rsi(df['Close'])
+
+        patterns=predict_future_trade_patterns(df)
+        if not patterns:
+            st.warning("パターンは検出されませんでした")
+        else:
+            patterns.sort(key=lambda x:x.get('confidence',50),reverse=True)
+            top_patterns=patterns[:5]
+            rows=[]
+            for p in top_patterns:
+                rows.append({
+                    'パターン':p['name'],
+                    '種別':p['kind'],
+                    '信頼度(%)':p['confidence'],
+                    'エントリー':format_price(p['entry']),
+                    '利確目安':format_price(p['tp']),
+                    '損切り':format_price(p['sl'])
+                })
+            st.subheader("🔎 信頼度上位パターン")
+            st.table(pd.DataFrame(rows))
+
+        # 描画
+        fig,ax=plt.subplots(figsize=(14,6))
+        ax.plot(df.index,df['Close'],label='Close',color='tab:blue')
+        ax.plot(df.index,df['SMA20'],label='SMA20',color='tab:orange')
+        ax.plot(df.index,df['SMA50'],label='SMA50',color='tab:green')
+        ax.grid(alpha=0.2)
+        ax.set_title(f"{symbol} - 過去1年のチャート")
+
+        # 未来パターン矢印描画
+        for p in top_patterns:
+            if p['kind']=='上昇':
+                ax.annotate(f"↑{p['name']}({p['confidence']}%)",
+                            xy=(df.index[-1], float(df['Close'].iloc[-1])),
+                            xytext=(df.index[-1], float(p['tp'])),
+                            arrowprops=dict(facecolor='green', shrink=0.05))
+            else:
+                ax.annotate(f"↓{p['name']}({p['confidence']}%)",
+                            xy=(df.index[-1], float(df['Close'].iloc[-1])),
+                            xytext=(df.index[-1], float(p['tp'])),
+                            arrowprops=dict(facecolor='red', shrink=0.05))
+
+        ax.legend()
+        st.pyplot(fig)
+
+    except Exception as e:
+        st.error(f"エラー発生: {e}")
