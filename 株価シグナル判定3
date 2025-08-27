@@ -1,0 +1,106 @@
+import streamlit as st
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+st.set_page_config(page_title="株価トレンド予測", layout="wide")
+st.title("📊 株価トレンド予測＆エントリー目安")
+
+# 銘柄コード入力
+code = st.text_input("銘柄コードを入力（例: 7203.T, AAPL）", "7203.T")
+
+# RSI計算関数
+def calc_rsi(series, period=14):
+    delta = series.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(period).mean()
+    avg_loss = loss.rolling(period).mean()
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+# 安全に最後の値を取得
+def safe_last_value(v):
+    if isinstance(v, pd.Series) or isinstance(v, pd.DataFrame):
+        if v.empty:
+            return None
+        if isinstance(v, pd.DataFrame):
+            return safe_last_value(v.iloc[-1, 0])
+        else:
+            return safe_last_value(v.iloc[-1])
+    elif isinstance(v, (list, tuple)):
+        if len(v) == 0:
+            return None
+        else:
+            return safe_last_value(v[-1])
+    else:
+        return v
+
+# 数値フォーマット
+def format_val(v):
+    v = safe_last_value(v)
+    if v is None:
+        return "N/A"
+    if isinstance(v, (int, float, np.float64, np.int64)):
+        try:
+            return f"{v:,.2f}"
+        except Exception:
+            return str(v)
+    return str(v)
+
+if st.button("解析する"):
+    try:
+        # データ取得（日足）
+        data = yf.download(code, period="1y", interval="1d")
+        if data.empty:
+            st.error("データが取得できませんでした。銘柄コードを確認してください。")
+            st.stop()
+        
+        # 移動平均・RSI
+        data["SMA20"] = data["Close"].rolling(20).mean()
+        data["SMA50"] = data["Close"].rolling(50).mean()
+        data["RSI"] = calc_rsi(data["Close"])
+        
+        # 最新値を取得
+        close = float(safe_last_value(data["Close"]))
+        sma20 = float(safe_last_value(data["SMA20"]))
+        sma50 = float(safe_last_value(data["SMA50"]))
+        rsi = float(safe_last_value(data["RSI"]))
+
+        # トレンド判定
+        trend = "不明"
+        entry_price = None
+        breakout_price = None
+        if close is not None and sma20 is not None and sma50 is not None:
+            if close > sma20 and sma20 > sma50:
+                trend = "上昇トレンド"
+                entry_price = sma20
+                breakout_price = sma50
+            elif close < sma20 and sma20 < sma50:
+                trend = "下降トレンド"
+                entry_price = sma20
+                breakout_price = sma50
+            elif abs(close - sma20)/sma20 < 0.02:
+                trend = "横ばいレンジ"
+                entry_price = sma20
+                breakout_price = sma20 * 1.02
+
+        st.subheader(f"📈 現在トレンド: {trend}")
+        if entry_price is not None:
+            st.write(f"エントリー目安価格: {format_val(entry_price)} 円")
+        if breakout_price is not None:
+            st.write(f"トレンド破綻ライン: {format_val(breakout_price)} 円")
+
+        # グラフ描画
+        fig, ax = plt.subplots(figsize=(12,6))
+        ax.plot(data.index, data["Close"], label="終値", color="blue")
+        ax.plot(data.index, data["SMA20"], label="SMA20", color="orange")
+        ax.plot(data.index, data["SMA50"], label="SMA50", color="green")
+        ax.set_title(f"{code} 株価チャート（過去1年）")
+        ax.legend()
+        st.pyplot(fig)
+
+    except Exception as e:
+        st.error(f"エラー: {e}")
+
