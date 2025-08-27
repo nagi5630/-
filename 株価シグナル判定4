@@ -1,0 +1,156 @@
+# streamlit_future_pattern.py
+import streamlit as st
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+st.set_page_config(page_title="未来予測チャート", layout="wide")
+st.title("📈 株価未来予測チャート（パターンベース）")
+
+# ---------- ユーティリティ ----------
+def safe_last_value(v):
+    if isinstance(v, pd.DataFrame):
+        if v.empty:
+            return None
+        return safe_last_value(v.iloc[-1, 0])
+    if isinstance(v, pd.Series):
+        if v.empty:
+            return None
+        return safe_last_value(v.iloc[-1])
+    if isinstance(v, (list, tuple, np.ndarray)):
+        if len(v) == 0:
+            return None
+        return safe_last_value(v[-1])
+    return v
+
+def format_price(v):
+    v = safe_last_value(v)
+    if v is None:
+        return "N/A"
+    try:
+        return f"{float(v):,.2f}"
+    except Exception:
+        return str(v)
+
+def pct(a, b):
+    try:
+        a = float(a)
+        b = float(b)
+        if a == 0:
+            return 0.0
+        return abs(a - b) / abs(a) * 100.0
+    except Exception:
+        return 0.0
+
+# ---------- 簡易パターン予測 ----------
+def predict_future_from_pattern(df):
+    """
+    過去パターンから未来の値を予測
+    """
+    closes = df['Close'].values
+    last_close = closes[-1]
+    patterns = []
+
+    # ダブルボトム予測
+    min_price = closes[-20:].min()
+    if last_close <= min_price * 1.02:
+        target = last_close + (last_close - min_price)
+        patterns.append({
+            'name': 'ダブルボトム予測',
+            'kind': '上昇予測',
+            'entry': last_close,
+            'target': target,
+            'stop': min_price * 0.99
+        })
+
+    # ダブルトップ予測
+    max_price = closes[-20:].max()
+    if last_close >= max_price * 0.98:
+        target = last_close - (max_price - last_close)
+        patterns.append({
+            'name': 'ダブルトップ予測',
+            'kind': '下落予測',
+            'entry': last_close,
+            'target': target,
+            'stop': max_price * 1.01
+        })
+
+    # ソーサーボトム/トップの単純予測
+    if closes[-10:].mean() < closes[-20:-10].mean():
+        # 下から上昇する可能性
+        target = last_close * 1.05
+        patterns.append({
+            'name': 'ソーサーボトム予測',
+            'kind': '上昇予測',
+            'entry': last_close,
+            'target': target,
+            'stop': last_close * 0.98
+        })
+    elif closes[-10:].mean() > closes[-20:-10].mean():
+        target = last_close * 0.95
+        patterns.append({
+            'name': 'ソーサートップ予測',
+            'kind': '下落予測',
+            'entry': last_close,
+            'target': target,
+            'stop': last_close * 1.02
+        })
+    return patterns
+
+# ---------- Streamlit UI ----------
+col1, col2 = st.columns([1,3])
+with col1:
+    symbol = st.text_input("銘柄コード (例: AAPL, 7203.T)", "AAPL")
+    period_select = st.selectbox("取得期間", ["6mo","1y","2y"], index=1)
+    run = st.button("解析・未来予測する")
+
+with col2:
+    placeholder = st.empty()
+
+if run:
+    try:
+        df = yf.download(symbol, period=period_select, interval="1d", progress=False)
+        if df is None or df.empty:
+            st.error("データが取得できません")
+            st.stop()
+        df = df.dropna()
+        if len(df) < 30:
+            st.error("データ不足")
+            st.stop()
+
+        patterns = predict_future_from_pattern(df)
+
+        # チャート描画
+        fig, ax = plt.subplots(figsize=(14,6))
+        ax.plot(df.index, df['Close'], color='gray', label='過去Close')
+
+        for p in patterns:
+            last_idx = df.index[-1]
+            future_idx = pd.date_range(last_idx, periods=5, freq='B')[1:]  # 5営業日予測
+            entry = p['entry']
+            target = p['target']
+            stop = p['stop']
+            ax.plot([last_idx]+list(future_idx), [entry]+[target]*len(future_idx), color='green', linestyle='--', label=p['name'])
+            ax.axhline(stop, color='red', linestyle=':', label='損切ライン')
+
+        ax.set_title(f"{symbol} 未来予測チャート")
+        ax.set_xlabel("Date")
+        ax.set_ylabel("Price")
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize='small')
+        st.pyplot(fig)
+
+        if patterns:
+            st.subheader("🔮 予測パターン")
+            df_pat = pd.DataFrame(patterns)
+            df_pat['entry'] = df_pat['entry'].apply(format_price)
+            df_pat['target'] = df_pat['target'].apply(format_price)
+            df_pat['stop'] = df_pat['stop'].apply(format_price)
+            st.table(df_pat)
+        else:
+            st.info("現在のパターンから未来予測は検出されませんでした。")
+
+    except Exception as e:
+        st.error(f"エラー: {e}")
+
