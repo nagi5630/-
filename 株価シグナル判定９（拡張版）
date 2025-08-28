@@ -1,0 +1,343 @@
+# streamlit_future_trade_patterns_30.py
+# 未来パターン予測（30パターン）+ 信頼度 + エントリー/利確/損切り + 矢印可視化（Streamlit）
+# 依存: streamlit, yfinance, pandas, numpy, matplotlib
+
+import streamlit as st
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+st.set_page_config(page_title="株価未来パターン予測（30）", layout="wide")
+st.title("📈 株価未来パターン予測（30パターン対応）")
+
+# ------------------- ユーティリティ -------------------
+def safe_last_value(v):
+    if isinstance(v, pd.DataFrame):
+        if v.empty: return None
+        return safe_last_value(v.iloc[-1,0])
+    if isinstance(v, pd.Series):
+        if v.empty: return None
+        return safe_last_value(v.iloc[-1])
+    if isinstance(v,(list,tuple,np.ndarray)):
+        if len(v)==0: return None
+        return safe_last_value(v[-1])
+    return v
+
+def format_price(v):
+    v = safe_last_value(v)
+    if v is None: return "N/A"
+    try:
+        return f"{float(v):,.2f}"
+    except:
+        return str(v)
+
+def pct(a,b):
+    try:
+        a=float(a); b=float(b)
+        if a==0: return 0.0
+        return abs(a-b)/abs(a)*100.0
+    except:
+        return 0.0
+
+def calc_sma(series, period):
+    return series.rolling(period,min_periods=1).mean()
+
+def calc_ema(series, period):
+    return series.ewm(span=period, adjust=False, min_periods=1).mean()
+
+def calc_rsi(series, period=14):
+    delta = series.diff()
+    gain = delta.where(delta>0,0.0)
+    loss = -delta.where(delta<0,0.0)
+    avg_gain = gain.rolling(period,min_periods=1).mean()
+    avg_loss = loss.rolling(period,min_periods=1).mean()
+    rs = avg_gain/(avg_loss.replace(0,np.nan))
+    rsi = 100-(100/(1+rs))
+    return rsi.fillna(50.0)
+
+def calc_atr(df, period=14):
+    high = df['High'].astype(float)
+    low = df['Low'].astype(float)
+    close = df['Close'].astype(float)
+    prev_close = close.shift(1)
+    tr = pd.concat([
+        (high-low).abs(),
+        (high-prev_close).abs(),
+        (low-prev_close).abs()
+    ], axis=1).max(axis=1)
+    return tr.rolling(period, min_periods=1).mean()
+
+# ------------------- 未来パターン＋トレード目安 -------------------
+def predict_future_trade_patterns(df, lookback=60, risk_mult=1.0, use_atr=True):
+    # 入力ベース
+    closes = df['Close'].values.astype(float)
+    highs = df['High'].values.astype(float)
+    lows = df['Low'].values.astype(float)
+
+    last_close = float(closes[-1])
+    recent_c = closes[-lookback:]
+    recent_h = highs[-lookback:]
+    recent_l = lows[-lookback:]
+    recent_high = float(recent_h.max())
+    recent_low = float(recent_l.min())
+    mid_range = (recent_high + recent_low)/2.0
+
+    sma5 = float(calc_sma(df['Close'],5).iloc[-1])
+    sma20 = float(calc_sma(df['Close'],20).iloc[-1])
+    sma50 = float(calc_sma(df['Close'],50).iloc[-1])
+    ema21 = float(calc_ema(df['Close'],21).iloc[-1])
+    rsi = float(calc_rsi(df['Close']).iloc[-1])
+    atr = float(calc_atr(df).iloc[-1]) if use_atr else max(1.0, last_close*0.01)
+
+    trend_up = last_close > sma20 > sma50
+    trend_dn = last_close < sma20 < sma50
+
+    patterns = []
+
+    # 共通: エントリー/TP/SL計算
+    def trade_levels(kind: str, target_price: float, basis: float=None):
+        basis = float(basis if basis is not None else last_close)
+        # デフォルト: ATR を利用
+        if kind == '上昇':
+            entry = basis * (1 - 0.005)
+            sl = entry - atr * 1.5 * risk_mult
+            tp = float(target_price) if target_price is not None else entry + atr * 2.5 * risk_mult
+        else:
+            entry = basis * (1 + 0.005)
+            sl = entry + atr * 1.5 * risk_mult
+            tp = float(target_price) if target_price is not None else entry - atr * 2.5 * risk_mult
+        return float(entry), float(tp), float(sl)
+
+    def add_pattern(name, kind, confidence, target=None, basis=None):
+        entry, tp, sl = trade_levels(kind, target, basis)
+        rr = abs(tp - entry) / max(1e-9, abs(entry - sl))
+        patterns.append({
+            'name': name,
+            'kind': kind,
+            'confidence': int(confidence),
+            'entry': entry,
+            'tp': tp,
+            'sl': sl,
+            'rr': rr,
+            'target': tp  # 表示用のターゲットは利確目安
+        })
+
+    # ヘルパー: 小さなユーティリティ
+    def local_max(a):
+        return a[-2] > a[-3] and a[-2] > a[-1]
+    def local_min(a):
+        return a[-2] < a[-3] and a[-2] < a[-1]
+
+    # ------------------- ここから 30 パターン -------------------
+    a = recent_c  # 省略名
+
+    # 1-2 ダブルトップ/ダブルボトム
+    if len(a) >= 3 and local_max(a):
+        target = recent_low - (recent_high - recent_low) * 0.6
+        conf = 62 + (1 if trend_dn else -1) + (1 if rsi>65 else 0)
+        add_pattern('ダブルトップ', '下落', conf, target)
+    if len(a) >= 3 and local_min(a):
+        target = recent_high + (recent_high - recent_low) * 0.6
+        conf = 62 + (1 if trend_up else -1) + (1 if rsi<35 else 0)
+        add_pattern('ダブルボトム', '上昇', conf, target)
+
+    # 3-4 トリプルトップ/トリプルボトム（中央付近を基準）
+    if len(a) >= 5:
+        mid = float(a[-3])
+        if mid == max(a[-5:]):
+            target = recent_low - (mid - recent_low) * 0.7
+            add_pattern('トリプルトップ', '下落', 60, target)
+        if mid == min(a[-5:]):
+            target = recent_high + (recent_high - mid) * 0.7
+            add_pattern('トリプルボトム', '上昇', 60, target)
+
+    # 5-6 H&S / 逆H&S （7本窓）
+    if len(a) >= 7:
+        mid = float(a[-4])
+        if mid == max(a[-7:]) and trend_dn:
+            target = recent_low - (mid - recent_low)
+            add_pattern('ヘッド＆ショルダー', '下落', 61, target)
+        if mid == min(a[-7:]) and trend_up:
+            target = recent_high + (recent_high - mid)
+            add_pattern('逆ヘッド＆ショルダー', '上昇', 61, target)
+
+    # 7-8 ソーサー/ラウンドトップ（10本中央値）
+    if len(a) >= 10:
+        mid = float(a[-5])
+        if mid == min(a[-10:]):
+            target = recent_high + (recent_high - mid) * 0.8
+            add_pattern('ソーサー型', '上昇', 57, target)
+        if mid == max(a[-10:]):
+            target = recent_low - (mid - recent_low) * 0.8
+            add_pattern('ラウンドトップ型', '下落', 57, target)
+
+    # 9-10 フラッグ（上昇/下降）
+    if last_close > sma5:
+        add_pattern('フラッグ上昇', '上昇', 53, last_close + atr * 2.0)
+    else:
+        add_pattern('フラッグ下降', '下落', 53, last_close - atr * 2.0)
+
+    # 11-12 ペナント（上昇/下降）
+    if abs(last_close - sma5)/max(1e-9, sma5) < 0.01:
+        if trend_up:
+            add_pattern('ペナント上昇', '上昇', 52, last_close + atr * 1.8)
+        if trend_dn:
+            add_pattern('ペナント下降', '下落', 52, last_close - atr * 1.8)
+
+    # 13-14 V字/逆V字
+    if len(a) >= 3 and a[-2] < a[-3] and a[-2] < a[-1]:
+        add_pattern('V字回復', '上昇', 56, last_close + atr * 2.2)
+    if len(a) >= 3 and a[-2] > a[-3] and a[-2] > a[-1]:
+        add_pattern('逆V字', '下落', 56, last_close - atr * 2.2)
+
+    # 15-16 レンジブレイク（上/下）
+    if last_close > recent_high * 1.003:
+        add_pattern('レンジブレイク上', '上昇', 60, last_close + (recent_high - recent_low))
+    if last_close < recent_low * 0.997:
+        add_pattern('レンジブレイク下', '下落', 60, last_close - (recent_high - recent_low))
+
+    # 17 レンジ反発
+    if abs(last_close - mid_range)/max(1e-9, mid_range) < 0.02:
+        add_pattern('レンジ反発', '上昇' if last_close>mid_range else '下落', 51, mid_range)
+
+    # 18-19 ウェッジ（上昇/下降）の予兆（SMA20と価格の発散/収束）
+    slope20 = float(calc_sma(df['Close'],20).iloc[-1] - calc_sma(df['Close'],20).iloc[-5])
+    if slope20>0 and last_close>ema21 and (sma20 - sma50) > 0:
+        add_pattern('上昇ウェッジ（警戒）', '下落', 54, last_close - atr * 2.0)
+    if slope20<0 and last_close<ema21 and (sma20 - sma50) < 0:
+        add_pattern('下降ウェッジ（反発予兆）', '上昇', 54, last_close + atr * 2.0)
+
+    # 20-22 トライアングル（上昇/下降/対称）近似：高安の収束
+    width_now = recent_high - recent_low
+    width_prev = (highs[-2*lookback:-lookback].max() - lows[-2*lookback:-lookback].min()) if len(highs) >= 2*lookback else width_now
+    contracting = width_now < width_prev * 0.8
+    if contracting:
+        if trend_up:
+            add_pattern('上昇トライアングル', '上昇', 58, last_close + width_now)
+        if trend_dn:
+            add_pattern('下降トライアングル', '下落', 58, last_close - width_now)
+        add_pattern('対称トライアングル', '上昇' if trend_up else '下落', 55, last_close + (width_now if trend_up else -width_now))
+
+    # 23-24 チャネル（上昇/下降）: SMA傾きと偏差
+    dev = last_close - sma20
+    if trend_up and dev>0:
+        add_pattern('上昇チャネル', '上昇', 57, last_close + atr * 2.0)
+    if trend_dn and dev<0:
+        add_pattern('下降チャネル', '下落', 57, last_close - atr * 2.0)
+
+    # 25 カップ＆ハンドル（簡易）
+    if len(a)>=15:
+        mid15 = float(a[-8])
+        if mid15 == min(a[-15:]) and trend_up:
+            add_pattern('カップ＆ハンドル', '上昇', 59, recent_high + atr * 2.5)
+
+    # 26-27 ダイヤモンド（トップ/ボトム）近似：直近で拡大→収束
+    if len(a) >= 20:
+        w1 = (highs[-20:-10].max() - lows[-20:-10].min())
+        w2 = (highs[-10:].max() - lows[-10:].min())
+        if w1 > 0 and w2 < w1*0.7:
+            if trend_up:
+                add_pattern('ダイヤモンドトップ', '下落', 55, last_close - w2)
+            else:
+                add_pattern('ダイヤモンドボトム', '上昇', 55, last_close + w2)
+
+    # 28 メガホン（ブロードニング）: 直近で拡大
+    if len(a) >= 20:
+        w1 = (highs[-20:-10].max() - lows[-20:-10].min())
+        w2 = (highs[-10:].max() - lows[-10:].min())
+        if w2 > w1 * 1.2:
+            add_pattern('メガホン型', '下落' if rsi>65 else '上昇', 54, last_close + (atr * ( -2.0 if rsi>65 else 2.0)))
+
+    # 29-30 エクスパンディングトライアングル/ボックスレンジ
+    if w2 > w1 and not contracting:
+        add_pattern('エクスパンディングトライアングル', '上昇' if trend_up else '下落', 52, last_close + (width_now if trend_up else -width_now))
+    # ボックス（横ばい）
+    if abs(last_close - mid_range)/max(1e-9, mid_range) < 0.01 and not contracting:
+        add_pattern('ボックスレンジ維持', '上昇' if last_close>mid_range else '下落', 50, mid_range)
+
+    return patterns
+
+# ------------------- サイドバー / UI -------------------
+st.sidebar.header("⚙️ オプション")
+symbol = st.sidebar.text_input("銘柄コード", "AAPL")
+period = st.sidebar.selectbox("期間", ["6mo","1y","2y","5y"], index=1)
+lookback = st.sidebar.slider("予測に使う直近本数", min_value=20, max_value=120, value=60, step=5)
+risk_mult = st.sidebar.slider("リスク係数 (SL/TPのスケール)", 0.5, 2.0, 1.0, 0.1)
+use_atr = st.sidebar.checkbox("ATRを使ってTP/SLを調整", value=True)
+show_all = st.sidebar.checkbox("上位だけでなく全パターンを表示", value=False)
+run = st.sidebar.button("未来予測を実行")
+
+st.markdown("直近データから30種のチャート形状を **未来予測** としてスコアリング。各パターンのエントリー/利確/損切りを算出し、信頼度順で提示します。※あくまで参考・研究用です。")
+
+placeholder_table = st.empty()
+placeholder_chart = st.empty()
+
+if run:
+    try:
+        df = yf.download(symbol, period=period, interval="1d", progress=False).dropna()
+        if df.empty:
+            st.error("データ取得できませんでした")
+            st.stop()
+
+        # 指標
+        df['SMA20'] = calc_sma(df['Close'],20)
+        df['SMA50'] = calc_sma(df['Close'],50)
+        df['EMA21'] = calc_ema(df['Close'],21)
+        df['RSI'] = calc_rsi(df['Close'])
+        df['ATR'] = calc_atr(df)
+
+        patterns = predict_future_trade_patterns(df, lookback=lookback, risk_mult=risk_mult, use_atr=use_atr)
+        if not patterns:
+            st.warning("パターンは検出されませんでした")
+        else:
+            # 信頼度→RRで並び替え（信頼度優先、同率ならRR降順）
+            patterns_sorted = sorted(patterns, key=lambda x: (x.get('confidence',50), x.get('rr',1.0)), reverse=True)
+            top = patterns_sorted if show_all else patterns_sorted[:5]
+
+            table_rows = []
+            for p in top:
+                table_rows.append({
+                    'パターン': p['name'],
+                    '種別': p['kind'],
+                    '信頼度(%)': p['confidence'],
+                    'エントリー': format_price(p['entry']),
+                    '利確目安': format_price(p['tp']),
+                    '損切り': format_price(p['sl']),
+                    '想定RR': round(float(p['rr']),2)
+                })
+            placeholder_table.subheader("🔎 信頼度順の候補")
+            placeholder_table.table(pd.DataFrame(table_rows))
+
+            # 描画
+            fig, ax = plt.subplots(figsize=(14,6))
+            ax.plot(df.index, df['Close'], label='Close', color='tab:blue')
+            ax.plot(df.index, df['SMA20'], label='SMA20', color='tab:orange')
+            ax.plot(df.index, df['SMA50'], label='SMA50', color='tab:green')
+            ax.grid(alpha=0.2)
+            ax.set_title(f"{symbol} - {period} チャートと未来予測")
+
+            last_x = df.index[-1]
+            last_price = float(df['Close'].iloc[-1])
+
+            # 矢印と目印（エントリー/TP/SL）
+            for p in top:
+                color = 'green' if p['kind']=='上昇' else 'red'
+                ax.annotate(f"{'↑' if p['kind']=='上昇' else '↓'}{p['name']} ({p['confidence']}%)",
+                            xy=(last_x, last_price),
+                            xytext=(last_x, float(p['tp'])),
+                            arrowprops=dict(facecolor=color, shrink=0.05),
+                            fontsize=9)
+                # 水平ライン
+                ax.axhline(float(p['entry']), linestyle='--', alpha=0.3, label=f"Entry:{p['name']}")
+                ax.axhline(float(p['tp']), linestyle='-', alpha=0.25, label=f"TP:{p['name']}")
+                ax.axhline(float(p['sl']), linestyle=':', alpha=0.25, label=f"SL:{p['name']}")
+
+            ax.legend(loc='upper left', ncol=3, fontsize=8)
+            placeholder_chart.pyplot(fig)
+
+            # 注記
+            st.info("※ 本ツールは参考用の定義ベース推定です。実運用では出来高・ギャップ・イベント等も必ず考慮してください。")
+
+    except Exception as e:
+        st.error(f"エラー発生: {e}")
