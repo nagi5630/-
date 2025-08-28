@@ -1,0 +1,137 @@
+# streamlit_future_30patterns_fixed.py
+import streamlit as st
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+st.set_page_config(page_title="株価30パターン未来予測", layout="wide")
+st.title("📊 株価30パターン未来予測（ルール＋AIスタブ）")
+
+# ------------------- ユーティリティ -------------------
+def safe_last_value(v):
+    if isinstance(v, pd.DataFrame) and not v.empty:
+        return safe_last_value(v.iloc[-1,0])
+    if isinstance(v, pd.Series) and not v.empty:
+        return safe_last_value(v.iloc[-1])
+    if isinstance(v, (list, tuple, np.ndarray)) and len(v) > 0:
+        return safe_last_value(v[-1])
+    return v
+
+def format_price(v):
+    v = safe_last_value(v)
+    return f"{float(v):,.2f}" if v is not None else "N/A"
+
+# ------------------- 未来予測生成 -------------------
+def generate_future(df, days=5):
+    """終値を起点にランダム変動で未来値を生成（AIスタブ置き換え可）"""
+    last = safe_last_value(df['Close'])
+    if last is None:
+        return pd.Series(dtype=float)
+    future = [last]
+    for _ in range(days):
+        change = last * np.random.randn()*0.01  # 1%前後のランダム変動
+        last = last + change
+        future.append(last)
+    future_dates = pd.date_range(df.index[-1]+pd.Timedelta(days=1), periods=days)
+    return pd.Series(future[1:], index=future_dates)
+
+# ------------------- 30パターン名 -------------------
+pattern_names = [
+    "ダブルトップ", "ダブルボトム", "トリプルトップ", "トリプルボトム",
+    "ヘッド＆ショルダー", "逆ヘッド＆ショルダー", "ソーサートップ", "ソーサーボトム",
+    "上昇ペナント", "下降ペナント", "上昇フラッグ", "下降フラッグ",
+    "上昇チャネル", "下降チャネル", "レンジ上限反発", "レンジ下限反発",
+    "ブレイクアウト上昇", "ブレイクアウト下落", "V字回復", "V字下落",
+    "W字底", "M字天井", "ラウンドトップ", "ラウンドボトム",
+    "三角持ち合い上昇", "三角持ち合い下落", "下降ウェッジ", "上昇ウェッジ",
+    "ガッパー上昇", "ガッパー下落"
+]
+
+# ------------------- 30パターン判定（ルール＋AIスタブ） -------------------
+def detect_patterns_future(future_series):
+    patterns = []
+    last_price = safe_last_value(future_series)
+    if last_price is None:
+        return patterns
+    np.random.seed(42)
+    for i, name in enumerate(pattern_names):
+        future_val = last_price * (1 + np.random.randn()*0.02)
+        entry = last_price * 0.995
+        target = future_val
+        stop = last_price * 0.99
+        kind = '上昇' if future_val > last_price else '下落'
+        confidence = np.random.randint(50,95)
+        patterns.append({
+            'name': name,
+            'kind': kind,
+            'entry': entry,
+            'target': target,
+            'stop': stop,
+            'confidence': confidence,
+            'future_val': future_val
+        })
+    patterns.sort(key=lambda x:x['confidence'], reverse=True)
+    return patterns
+
+# ------------------- Streamlit UI -------------------
+st.markdown("""
+直近データから30種のチャート形状を未来予測（ルール＋AIスタブハイブリッド）し、
+エントリー/利確/損切りの目安を表示します。AIはスタブ（ランダムスコア）で、後で学習済モデルに置き換え可能です。
+""")
+
+col1, col2 = st.columns([1,3])
+with col1:
+    symbol = st.text_input("銘柄コード", "AAPL")
+    future_days = st.selectbox("未来予測日数", [5, 10])
+    run = st.button("予測開始")
+
+with col2:
+    placeholder = st.empty()
+
+if run:
+    try:
+        df = yf.download(symbol, period="1y", interval="1d", progress=False).dropna()
+        if df is None or df.empty:
+            st.error("データ取得できませんでした")
+            st.stop()
+
+        future_series = generate_future(df, days=future_days)
+        if future_series.empty:
+            st.error("未来予測が生成できませんでした")
+            st.stop()
+
+        patterns = detect_patterns_future(future_series)
+        top_patterns = patterns[:10]
+
+        # 表示用テーブル
+        rows=[]
+        for p in top_patterns:
+            rows.append({
+                'パターン': p['name'],
+                '種別': p['kind'],
+                '信頼度(%)': p['confidence'],
+                'エントリー': format_price(p['entry']),
+                '利確': format_price(p['target']),
+                '損切り': format_price(p['stop']),
+                '未来予測価格': format_price(p['future_val'])
+            })
+        st.subheader("🔎 信頼度上位パターン")
+        st.table(pd.DataFrame(rows))
+
+        # チャート描画
+        fig, ax = plt.subplots(figsize=(14,6))
+        ax.plot(df.index, df['Close'], label='現在価格', color='blue')
+        ax.plot(future_series.index, future_series.values, label='未来予測', linestyle='--', color='red', marker='o')
+        for p in top_patterns:
+            ax.annotate(p['name'],
+                        xy=(future_series.index[-1], p['future_val']),
+                        xytext=(future_series.index[-1], p['future_val']*1.01),
+                        arrowprops=dict(facecolor='red', shrink=0.05))
+        ax.grid(alpha=0.2)
+        ax.set_title(f"{symbol} - 未来{future_days}日予測")
+        ax.legend()
+        st.pyplot(fig)
+
+    except Exception as e:
+        st.error(f"エラー発生: {e}")
