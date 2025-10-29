@@ -7,6 +7,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import japanize_matplotlib 
 
 st.set_page_config(page_title="株価未来パターン予測（30）", layout="wide")
 st.title("📈 株価未来パターン予測（30パターン対応）")
