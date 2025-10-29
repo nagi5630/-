@@ -7,6 +7,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import requests
 from datetime import datetime, timedelta
+import japanize_matplotlib 
 
 st.set_page_config(page_title="株価未来パターン予測（30） - 修正版", layout="wide")
 st.title("📈 株価未来パターン予測（30パターン対応） - 出来高/ギャップ/イベント統合（安全化）")
